@@ -1,0 +1,39 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Environments
+venv/
+env/
+.env
+.venv/
+ENV/
+
+# Gradio & Local Tunnel leftovers
+.gradio/
+cloudflared.exe
+*.tunnel
+
+# Streamlit temporary data
+.streamlit/secrets.toml
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+temp_*.png
+*.log
+
+# Large datasets if downloaded locally
+*.mat
+nyu_depth_v2*.h5
+nyu_depth_v2*.tar
+nyu_depth_v2*.zip
+data/raw/
+data/processed/
