@@ -125,16 +125,24 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 # 3. Helper Functions & Colormapping
 # -----------------------------------------------------------------------------
 def colormap_depth(depth_map, cmap_name='turbo', vmin=None, vmax=None):
-    valid = depth_map > 0.05
+    valid = (depth_map > 0.05) & np.isfinite(depth_map)
     if np.sum(valid) == 0:
         return np.zeros((depth_map.shape[0], depth_map.shape[1], 3), dtype=np.uint8)
 
-    if vmin is None:
-        vmin = float(np.min(depth_map[valid]))
-    if vmax is None:
-        vmax = float(np.max(depth_map[valid]))
+    clean_d = depth_map.copy()
+    if np.sum(~valid) > 0:
+        clean_d = fill_depth_holes(clean_d)
 
-    norm = np.clip((depth_map - vmin) / (max(vmax - vmin, 1e-4)), 0.0, 1.0)
+    val_pixels = clean_d[clean_d > 0.05]
+    if len(val_pixels) == 0:
+        val_pixels = depth_map[valid]
+
+    if vmin is None:
+        vmin = float(np.percentile(val_pixels, 1))
+    if vmax is None:
+        vmax = float(np.percentile(val_pixels, 99))
+
+    norm = np.clip((clean_d - vmin) / max(vmax - vmin, 1e-4), 0.0, 1.0)
     cmap = plt.get_cmap(cmap_name)
     colored = (cmap(norm)[:, :, :3] * 255.0).astype(np.uint8)
     return colored
@@ -374,10 +382,16 @@ def run_full_pipeline(
     edge_map = rec_results['discontinuities']
     gate_map = rec_results['edge_gate']
 
-    # Colormapped Visualizations
-    valid_gt = gt_depth[gt_depth > 0.05]
-    v_min = float(valid_gt.min()) if len(valid_gt) > 0 else 0.0
-    v_max = float(gt_depth.max()) if float(gt_depth.max()) > v_min else 8.0
+    # Robust Adaptive Contrast Colormapped Visualizations
+    valid_gt = gt_depth[(gt_depth > 0.1) & np.isfinite(gt_depth)]
+    if len(valid_gt) > 50:
+        v_min = float(np.percentile(valid_gt, 2))
+        v_max = float(np.percentile(valid_gt, 98))
+    else:
+        v_min, v_max = 0.8, 5.0
+
+    if v_max - v_min < 0.5:
+        v_max = v_min + 1.5
 
     vis_gt = colormap_depth(gt_depth, depth_colormap, v_min, v_max)
     vis_lr = colormap_depth(cv2.resize(lr_depth, (W_t, H_t), interpolation=cv2.INTER_NEAREST), depth_colormap, v_min, v_max)
@@ -497,18 +511,18 @@ with st.sidebar:
                         d_img = cv2.cvtColor(d_img, cv2.COLOR_RGB2GRAY)
                     
                     # Robust scale detection:
-                    # 1) 16-bit millimeter depth (e.g. 1000 - 8000 mm)
                     if d_img.dtype == np.uint16 or float(np.max(d_img)) > 255.0:
-                        depth_selected = d_img.astype(np.float32) / 1000.0
-                    # 2) Already metric depth in meters (e.g. 0.5m - 10.0m)
+                        depth_selected = np.clip(d_img.astype(np.float32) / 1000.0, 0.1, 8.0)
                     elif float(np.max(d_img)) <= 12.0:
-                        depth_selected = d_img.astype(np.float32)
-                    # 3) 8-bit normalized depth map (0 - 255)
+                        depth_selected = np.clip(d_img.astype(np.float32), 0.1, 8.0)
                     else:
-                        depth_selected = (d_img.astype(np.float32) / 255.0) * 8.0
+                        depth_selected = (d_img.astype(np.float32) / 255.0) * 4.5 + 1.0
+
+                    depth_selected = fill_depth_holes(depth_selected)
             else:
                 gray = cv2.cvtColor(rgb_selected, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-                depth_selected = (1.0 - gray) * 3.5 + 1.2
+                smooth_gray = cv2.bilateralFilter(gray, 9, 0.2, 5.0)
+                depth_selected = np.clip((1.0 - smooth_gray) * 3.2 + 1.4, 0.8, 5.0)
         else:
             rgb_selected, depth_selected = load_preset_scene("Scene 1: Living Room")
 
@@ -518,7 +532,8 @@ with st.sidebar:
         if camera_snap is not None:
             rgb_selected = np.array(Image.open(camera_snap).convert("RGB"))
             gray = cv2.cvtColor(rgb_selected, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-            depth_selected = (1.0 - gray) * 3.5 + 1.2
+            smooth_gray = cv2.bilateralFilter(gray, 9, 0.2, 5.0)
+            depth_selected = np.clip((1.0 - smooth_gray) * 3.2 + 1.4, 0.8, 5.0)
         else:
             st.info("Point camera at your scene or face to stream depth upsampling.")
             rgb_selected, depth_selected = load_preset_scene("Scene 1: Living Room")
@@ -678,21 +693,9 @@ with tab_recon:
     st.info("💡 **File Format Guide**: The **16-bit Metric PNG** stores physical millimeter values ($1800-4500\\text{ mm}$) for ROS, SLAM, LiDAR, and robotics. Because image viewers expect $0-65535$, it renders as nearly black. To view or present the colorful visualization, download the **Colormapped Depth (RGB PNG)**.")
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
-    # 16-bit millimeter PNG
-    metric_bytes = convert_depth_to_png_bytes(results['pred_hybrid'])
-    with col_dl1:
-        st.download_button(
-            label="💾 Download 16-bit Metric PNG (Millimeters)",
-            data=metric_bytes,
-            file_name="depth_reconstruction_16bit_mm.png",
-            mime="image/png",
-            use_container_width=True
-        )
-        st.caption("Standard metric format used in ROS, SLAM, LiDAR, and robotics pipelines.")
-
-    # Colormapped PNG
+    # 1. Colormapped PNG (Vibrant, Presentation Ready)
     color_bytes = convert_rgb_to_png_bytes(results['vis_hybrid'])
-    with col_dl2:
+    with col_dl1:
         st.download_button(
             label="🎨 Download Colormapped Depth (RGB PNG)",
             data=color_bytes,
@@ -700,11 +703,11 @@ with tab_recon:
             mime="image/png",
             use_container_width=True
         )
-        st.caption(f"Presentation-ready visualization using the {depth_cmap} colormap.")
+        st.caption(f"⭐ **Recommended**: Presentation-ready visual depth map using {depth_cmap}.")
 
-    # CSV report
+    # 2. CSV report
     csv_bytes = df_m.to_csv(index=False).encode('utf-8')
-    with col_dl3:
+    with col_dl2:
         st.download_button(
             label="📊 Download Comparative Metrics CSV",
             data=csv_bytes,
@@ -713,6 +716,18 @@ with tab_recon:
             use_container_width=True
         )
         st.caption("Complete 7-method comparison across RMSE, MAE, PSNR, SSIM, and Latency.")
+
+    # 3. 16-bit millimeter PNG
+    metric_bytes = convert_depth_to_png_bytes(results['pred_hybrid'])
+    with col_dl3:
+        st.download_button(
+            label="💾 Download 16-bit Metric PNG (Millimeters)",
+            data=metric_bytes,
+            file_name="depth_reconstruction_16bit_mm.png",
+            mime="image/png",
+            use_container_width=True
+        )
+        st.caption("Standard metric format for ROS, SLAM, LiDAR (opens as dark in photo viewers).")
 
 
 # ----------------- TAB 2: MULTI-METHOD COMPARISON -----------------
@@ -803,7 +818,8 @@ with tab_camera:
     if live_cam is not None:
         cam_rgb = np.array(Image.open(live_cam).convert("RGB"))
         cam_gray = cv2.cvtColor(cam_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        cam_depth = (1.0 - cam_gray) * 3.5 + 1.2
+        smooth_gray = cv2.bilateralFilter(cam_gray, 9, 0.2, 5.0)
+        cam_depth = np.clip((1.0 - smooth_gray) * 3.2 + 1.4, 0.8, 5.0)
         
         with st.spinner("Processing live camera snapshot..."):
             cam_res = run_full_pipeline(
