@@ -148,3 +148,24 @@ class HybridDepthPipeline:
             'edge_gate': gate,
             'rgb_norm': rgb_norm
         }
+def predict_depth(self, rgb_img, lr_depth):
+    # Ensure inputs are float32 and on the correct device (CPU or CUDA)
+    self.model.eval()
+    with torch.no_grad():
+        # Preprocess and move to device as float32
+        rgb_tensor = torch.from_numpy(rgb_img).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+        depth_tensor = torch.from_numpy(lr_depth).unsqueeze(0).unsqueeze(0).float().to(self.device)
+        
+        # Concatenate inputs for the 5-channel Guided U-Net
+        model_input = torch.cat([rgb_tensor, depth_tensor], dim=1)
+        
+        # Forward pass
+        output = self.model(model_input)
+        
+        # Clamp output to prevent CPU floating-point overflow/inf values
+        output = torch.clamp(output, min=0.0, max=10.0)
+        
+        # Convert back to numpy CPU array safely
+        pred_depth = output.squeeze().cpu().numpy()
+        
+    return pred_depth
