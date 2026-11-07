@@ -301,8 +301,19 @@ def run_full_pipeline(
 ):
     H_t, W_t = 256, 320
 
-    # Ensure finite numbers
+    # Sanitize RGB dimensions
+    if rgb_raw.ndim == 2:
+        rgb_raw = cv2.cvtColor(rgb_raw, cv2.COLOR_GRAY2RGB)
+    elif rgb_raw.ndim == 3 and rgb_raw.shape[2] == 4:
+        rgb_raw = rgb_raw[:, :, :3]
+
+    # Sanitize Depth dimensions
+    if gt_depth.ndim > 2:
+        gt_depth = gt_depth[:, :, 0]
+
+    # Ensure finite numbers and metric boundaries
     gt_depth = np.nan_to_num(gt_depth, nan=0.0, posinf=10.0, neginf=0.0)
+    gt_depth = np.clip(gt_depth, 0.0, 10.0)
 
     # Standardize dimensions
     rgb_res = cv2.resize(rgb_raw, (W_t, H_t), interpolation=cv2.INTER_LINEAR)
@@ -479,8 +490,20 @@ with st.sidebar:
                     depth_selected = np.load(uploaded_depth).astype(np.float32)
                 else:
                     d_img = np.array(Image.open(uploaded_depth))
-                    if d_img.dtype == np.uint16:
+                    # Sanitize dimensions if multi-channel (RGB or RGBA)
+                    if d_img.ndim == 3:
+                        if d_img.shape[2] == 4:
+                            d_img = d_img[:, :, :3]
+                        d_img = cv2.cvtColor(d_img, cv2.COLOR_RGB2GRAY)
+                    
+                    # Robust scale detection:
+                    # 1) 16-bit millimeter depth (e.g. 1000 - 8000 mm)
+                    if d_img.dtype == np.uint16 or float(np.max(d_img)) > 255.0:
                         depth_selected = d_img.astype(np.float32) / 1000.0
+                    # 2) Already metric depth in meters (e.g. 0.5m - 10.0m)
+                    elif float(np.max(d_img)) <= 12.0:
+                        depth_selected = d_img.astype(np.float32)
+                    # 3) 8-bit normalized depth map (0 - 255)
                     else:
                         depth_selected = (d_img.astype(np.float32) / 255.0) * 8.0
             else:
@@ -491,7 +514,7 @@ with st.sidebar:
 
     elif input_mode == "Live Webcam Snapshot":
         st.markdown("**Live Real-Time Camera Stream**")
-        camera_snap = st.camera_input("Capture frame from camera")
+        camera_snap = st.camera_input("Capture frame from camera", key="sidebar_cam")
         if camera_snap is not None:
             rgb_selected = np.array(Image.open(camera_snap).convert("RGB"))
             gray = cv2.cvtColor(rgb_selected, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
@@ -652,6 +675,7 @@ with tab_recon:
 
     st.markdown("---")
     st.markdown("#### 💾 Export Center")
+    st.info("💡 **File Format Guide**: The **16-bit Metric PNG** stores physical millimeter values ($1800-4500\\text{ mm}$) for ROS, SLAM, LiDAR, and robotics. Because image viewers expect $0-65535$, it renders as nearly black. To view or present the colorful visualization, download the **Colormapped Depth (RGB PNG)**.")
     col_dl1, col_dl2, col_dl3 = st.columns(3)
     
     # 16-bit millimeter PNG
@@ -775,7 +799,7 @@ with tab_camera:
     st.markdown("#### 📷 Real-Time Live Camera Depth Upsampling")
     st.caption("Point your webcam or phone camera at any indoor object, capture a snapshot, and inspect instant edge-aware depth reconstruction.")
 
-    live_cam = st.camera_input("Take a photo with your webcam")
+    live_cam = st.camera_input("Take a photo with your webcam", key="tab_cam")
     if live_cam is not None:
         cam_rgb = np.array(Image.open(live_cam).convert("RGB"))
         cam_gray = cv2.cvtColor(cam_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0

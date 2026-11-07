@@ -64,16 +64,17 @@ def guided_filter_refinement(depth_map, rgb_guide, radius=5, eps=1e-3):
     cov_Ip = mean_Ip - mean_I * mean_p
 
     mean_II = cv2.boxFilter(guide * guide, cv2.CV_32F, ksize)
-    var_I = mean_II - mean_I * mean_I
+    var_I = np.maximum(mean_II - mean_I * mean_I, 0.0)
 
-    a = cov_Ip / (var_I + eps)
+    denom = np.maximum(var_I + eps, 1e-6)
+    a = cov_Ip / denom
     b = mean_p - a * mean_I
 
     mean_a = cv2.boxFilter(a, cv2.CV_32F, ksize)
     mean_b = cv2.boxFilter(b, cv2.CV_32F, ksize)
 
     q = mean_a * guide + mean_b
-    return np.maximum(q, 0.0)
+    return np.clip(q, 0.0, 15.0)
 
 
 def joint_bilateral_filter(depth_map, rgb_guide, diameter=7, sigma_color=0.1, sigma_space=5.0):
@@ -159,7 +160,7 @@ def edge_gated_boundary_refinement(unet_depth, rgb_guide, radius=5, eps=1e-3, de
 
     # 5. Edge-Gated Blend
     hybrid_depth = gate * refined_depth + (1.0 - gate) * unet_depth
-    return hybrid_depth, gate
+    return np.clip(hybrid_depth, 0.0, 15.0), gate
 
 
 # Alias for compatibility
